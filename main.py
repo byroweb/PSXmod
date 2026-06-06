@@ -27,11 +27,35 @@ import pygame.mixer as _pg_mixer
 
 APP_DIR = Path(__file__).parent.resolve()
 JPSXDEC_JAR = (APP_DIR / "jpsxdec" / "jpsxdec.jar").resolve()
+
+# Per-game working paths. Each game gets its own folder, APP_DIR/<bin name>/,
+# so the app root doesn't fill up with non-specific working folders. These
+# defaults are repointed by set_workspace() the moment a BIN or project loads.
+WORKSPACE_DIR = APP_DIR
 EXISTING_FILES_DIR = (APP_DIR / "EXISTING_FILES").resolve()
 NEW_FILES_DIR = (APP_DIR / "NEW_FILES").resolve()
 NEW_AUDIO_DIR = (APP_DIR / "NEW_AUDIO").resolve()
+TO_MODIFY_DIR = (APP_DIR / "TO_MODIFY").resolve()
 INDEX_PATH = (APP_DIR / "jpsxdec.idx").resolve()
+
+# App-level (not game-specific): always stays in the app root.
 RECENT_PROJECT_FILE = (APP_DIR / "recent_project.txt").resolve()
+
+
+def set_workspace(bin_path) -> Path:
+    """Point all per-game working paths at APP_DIR/<bin name>/ so every game's
+    extracted files, new assets, index and project file stay together in one
+    folder named after the BIN. Creates the folder and returns it."""
+    global WORKSPACE_DIR, EXISTING_FILES_DIR, NEW_FILES_DIR
+    global NEW_AUDIO_DIR, TO_MODIFY_DIR, INDEX_PATH
+    WORKSPACE_DIR = (APP_DIR / Path(bin_path).stem).resolve()
+    EXISTING_FILES_DIR = WORKSPACE_DIR / "EXISTING_FILES"
+    NEW_FILES_DIR = WORKSPACE_DIR / "NEW_FILES"
+    NEW_AUDIO_DIR = WORKSPACE_DIR / "NEW_AUDIO"
+    TO_MODIFY_DIR = WORKSPACE_DIR / "TO_MODIFY"
+    INDEX_PATH = WORKSPACE_DIR / "jpsxdec.idx"
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    return WORKSPACE_DIR
 
 from dataclasses import dataclass as _dataclass
 from typing import Optional as _Optional
@@ -1619,6 +1643,9 @@ class MainWindow(QMainWindow):
         ef  = self.project.existing_files_dir
         bin_path = self.project.bin_path
 
+        if bin_path:
+            set_workspace(bin_path)      # new assets/index land in the game folder
+
         if idx and idx.exists() and ef and ef.exists():
             self.detail_panel.set_index_path(idx)
             if bin_path:
@@ -1694,6 +1721,7 @@ class MainWindow(QMainWindow):
             return
 
         bin_path = Path(path)
+        set_workspace(bin_path)          # repoint working dirs into APP_DIR/<bin name>/
         self.project.bin_path = bin_path
         self.project.index_path = INDEX_PATH
         self.project.existing_files_dir = EXISTING_FILES_DIR
@@ -1874,7 +1902,7 @@ class MainWindow(QMainWindow):
                 "No image entries are checked.")
             return
 
-        out_dir = APP_DIR / "TO_MODIFY"
+        out_dir = TO_MODIFY_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
 
         exported = 0
@@ -1906,8 +1934,9 @@ class MainWindow(QMainWindow):
 
     def _on_save_project(self):
         if not self.project.project_path:
+            default_proj = str(WORKSPACE_DIR / f"{self.project.name}.psxmod")
             path, _ = QFileDialog.getSaveFileName(
-                self, "Save project", f"{self.project.name}.psxmod",
+                self, "Save project", default_proj,
                 "PSXmod project (*.psxmod)"
             )
             if not path:
