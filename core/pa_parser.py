@@ -220,5 +220,28 @@ def contact_sheet(bin_path, sector_start, sector_end, cell=100.0, gap=1.5) -> Me
     return out
 
 
+def scene_mesh(bin_path, sector_start, sector_end, coord_limit=12000) -> Mesh:
+    """
+    Assemble a STAGE: merge all geometry blocks at their RAW (world) coordinates.
+
+    AC1 authors a stage's environment geometry directly in world space, so merging
+    the blocks unmodified reconstructs the actual level layout. Blocks whose bbox
+    exceeds `coord_limit` are skipped — those are the object/effect slots (e125+,
+    not-yet-cleanly-decoded sprites/MT models that share a local origin and would
+    pile up at the centre); they're placed per-instance by mission data, not here.
+    """
+    out = Mesh()
+    for ei, m in parse_pa_blocks(bin_path, sector_start, sector_end):
+        bb = m.bbox()
+        if not bb or max(abs(v) for v in bb) > coord_limit:
+            continue
+        base = len(out.vertices)
+        out.groups.append((f"e{ei}", base, len(m.vertices)))
+        out.vertices.extend(m.vertices)
+        for f in m.faces:
+            out.faces.append(Face(tuple(base + i for i in f.verts), f.color, f.textured))
+    return out
+
+
 # back-compat alias (old name)
 combined_mesh = contact_sheet
