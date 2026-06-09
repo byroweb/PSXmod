@@ -1795,7 +1795,7 @@ class MainWindow(QMainWindow):
 
     def _on_open_project(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open project", "", "AC1mod project (*.ac1mod *.psxmod);;All files (*)"
+            self, "Open project", "", "AC1mod project (*.ac1mod);;All files (*)"
         )
         if not path:
             return
@@ -1934,10 +1934,10 @@ class MainWindow(QMainWindow):
 
     def _on_save_project(self):
         if not self.project.project_path:
-            default_proj = str(WORKSPACE_DIR / f"{self.project.name}.psxmod")
+            default_proj = str(WORKSPACE_DIR / f"{self.project.name}.ac1mod")
             path, _ = QFileDialog.getSaveFileName(
                 self, "Save project", default_proj,
-                "AC1mod project (*.ac1mod *.psxmod)"
+                "AC1mod project (*.ac1mod)"
             )
             if not path:
                 return

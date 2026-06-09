@@ -11,7 +11,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
-log = logging.getLogger("psxmod")
+log = logging.getLogger("ac1mod")
 
 
 JPSXDEC_JAR = Path(__file__).parent.parent / "jpsxdec" / "jpsxdec.jar"

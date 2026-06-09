@@ -13,14 +13,14 @@ from core.jpsxdec import (
 )
 
 # Log to a file next to the script so the user can inspect it
-LOG_PATH = Path(__file__).parent.parent / "psxmod_debug.log"
+LOG_PATH = Path(__file__).parent.parent / "ac1mod_debug.log"
 logging.basicConfig(
     filename=str(LOG_PATH),
     filemode='w',
     level=logging.DEBUG,
     format='%(asctime)s %(levelname)s %(message)s',
 )
-log = logging.getLogger("psxmod")
+log = logging.getLogger("ac1mod")
 
 
 class IndexWorker(QThread):
