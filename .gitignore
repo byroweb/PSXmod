@@ -37,3 +37,6 @@ Thumbs.db
 
 # Third-party tool
 jpsxdec/
+
+# Local Claude Code config
+.claude/
