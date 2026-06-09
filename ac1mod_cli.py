@@ -169,6 +169,37 @@ def cmd_render(proj, idx, args):
     print(f"wrote {out}  ({len(mesh.faces)} faces, view yaw={args.yaw} pitch={args.pitch})")
 
 
+def cmd_missions(proj, idx, args):
+    """Batch-render every mission's populated 3D scene to PNGs."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    import math
+    from PyQt6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from core.mission import mission_scene, mission_names
+    from core import raster
+    out_dir = args.out_dir or "/tmp/ac1_missions"
+    os.makedirs(out_dir, exist_ok=True)
+    names = mission_names(proj.bin_path, str(idx))
+    done = 0
+    for n in range(args.first, args.last + 1):
+        try:
+            sc, sp = mission_scene(proj.bin_path, n, str(idx))
+        except Exception as ex:
+            print(f"  mission {n}: error {ex}"); continue
+        if not sp:
+            continue
+        V, VN, F, Fcol, Fid = sc.to_arrays()
+        img, _ = raster.render(V, VN, F, Fcol, Fid, args.w, args.h,
+                               yaw=math.radians(args.yaw), pitch=math.radians(args.pitch),
+                               zoom=args.zoom)
+        nm = names.get(n, "").replace("/", "-").strip()
+        path = os.path.join(out_dir, f"mission_{n:02d}.png")
+        img.save(path)
+        print(f"  mission {n:02d}  {len(sp):3d} objects  {nm}  -> {path}")
+        done += 1
+    print(f"rendered {done} missions to {out_dir}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="AC1mod headless CLI")
     ap.add_argument("--project", help="path to a .ac1mod project")
@@ -176,6 +207,12 @@ def main():
 
     sub.add_parser("list", help="list PA files + notes")
     sub.add_parser("notes", help="dump all notes")
+    p = sub.add_parser("missions", help="batch-render every mission's populated scene")
+    p.add_argument("--out-dir"); p.add_argument("--first", type=int, default=0)
+    p.add_argument("--last", type=int, default=49)
+    p.add_argument("--yaw", type=float, default=30); p.add_argument("--pitch", type=float, default=42)
+    p.add_argument("--zoom", type=float, default=1.4)
+    p.add_argument("--w", type=int, default=900); p.add_argument("--h", type=int, default=700)
     p = sub.add_parser("info", help="geometry stats for a PA file"); p.add_argument("file")
     p = sub.add_parser("note", help="get/set a PA note")
     p.add_argument("action", choices=["get", "set"]); p.add_argument("file")
@@ -199,7 +236,7 @@ def main():
     args = ap.parse_args()
     _, proj, idx = load(args.project)
     {"list": cmd_list, "notes": cmd_notes, "info": cmd_info, "note": cmd_note,
-     "obj": cmd_obj, "render": cmd_render}[args.cmd](proj, idx, args)
+     "obj": cmd_obj, "render": cmd_render, "missions": cmd_missions}[args.cmd](proj, idx, args)
 
 
 if __name__ == "__main__":
