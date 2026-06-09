@@ -9,10 +9,11 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QSplitter, QTreeWidget, QTreeWidgetItem, QLabel, QPushButton,
     QFileDialog, QStatusBar, QMessageBox, QFrame, QGridLayout,
-    QSizePolicy, QAbstractItemView, QPlainTextEdit, QSpinBox, QStackedWidget
+    QSizePolicy, QAbstractItemView, QPlainTextEdit, QSpinBox, QStackedWidget,
+    QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer
-from PyQt6.QtGui import QPixmap, QImage, QColor, QFont, QBrush, QPainter, QPen
+from PyQt6.QtGui import QPixmap, QImage, QColor, QFont, QBrush, QPainter, QPen, QIcon
 from PyQt6.QtWidgets import QComboBox, QCheckBox
 
 from core.jpsxdec import (
@@ -1054,6 +1055,29 @@ class DetailPanel(QWidget):
     def set_bin_path(self, p: Path):
         self._bin_path = p
 
+    _mis_tim_cache: dict[int, Path] | None = None
+
+    def _resolve_mis_tim(self, entry) -> Path | None:
+        """Exact-index TIM path for a MIS.T[n] child, via core.mis (all 194).
+
+        Avoids jPSXdec's per-item substring collision (MIS.T[4] ⊂ MIS.T[40]).
+        """
+        import re as _re
+        m = _re.search(r"MIS\.T\[(\d+)\]", entry.full_id or entry.name or "")
+        if not m or not self._bin_path:
+            return None
+        idx = int(m.group(1))
+        if self._mis_tim_cache is None:
+            try:
+                from core import mis as _mis
+                out = EXISTING_FILES_DIR / "GG" / "MS"
+                paths = _mis.extract_tims(str(self._bin_path), out)
+                self._mis_tim_cache = {i: p for i, p in enumerate(paths)}
+            except Exception:
+                self._mis_tim_cache = {}
+        p = self._mis_tim_cache.get(idx)
+        return p if p and p.exists() else None
+
     # ---- audio playback ----
 
     def _init_mixer(self) -> bool:
@@ -1138,6 +1162,13 @@ class DetailPanel(QWidget):
             if self._orig_variant_combo:
                 self._orig_variant_combo.clear()
             tim_path = entry.tim_path
+
+        # MIS.T embeds ~194 mission-preview TIMs. jPSXdec's substring name match
+        # (MIS.T[4] ⊂ MIS.T[40]) collides, so resolve those by exact index here.
+        if tim_path is None:
+            tim_path = self._resolve_mis_tim(entry)
+            if tim_path:
+                entry.tim_path = tim_path
 
         # Attempt per-item TIM extraction if not yet present
         if tim_path is None and self._index_path:
@@ -1815,6 +1846,199 @@ class MissionView(QWidget):
         self.card.show_info("<br>".join(rows), pos)
 
 
+DEFAULT_CARD = (Path.home() / ".local/share/duckstation/memcards" /
+                "Armored Core (USA) (Reprint)_1.mcd")
+
+
+def _rgba_to_pixmap(w, h, rgba, scale=1):
+    img = QImage(rgba, w, h, QImage.Format.Format_RGBA8888)
+    if scale != 1:
+        img = img.scaled(w * scale, h * scale, Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.FastTransformation)
+    return QPixmap.fromImage(img.copy())
+
+
+class _EmblemDrop(QLabel):
+    """Emblem preview that accepts a dropped/clicked GIF or PNG."""
+    image_chosen = pyqtSignal(object)        # Path
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setFixedSize(264, 264)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet("background:#11171c; border:1px dashed #3D5567; color:#6B8AA0;")
+        self.setText("emblem")
+
+    def dragEnterEvent(self, e):
+        urls = e.mimeData().urls()
+        if urls and Path(urls[0].toLocalFile()).suffix.lower() in (".gif", ".png", ".bmp", ".jpg", ".jpeg"):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        urls = e.mimeData().urls()
+        if urls:
+            self.image_chosen.emit(Path(urls[0].toLocalFile()))
+
+    def mousePressEvent(self, e):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose emblem image", "", "Images (*.gif *.png *.bmp *.jpg *.jpeg)")
+        if path:
+            self.image_chosen.emit(Path(path))
+
+
+class MemoryCardView(QWidget):
+    """Browse a PS1 memory card as a directory of saves; view/edit AC1 emblems."""
+    def __init__(self, card_path=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("AC1mod — Memory Card")
+        self.resize(840, 560)
+        self._card = None
+        self._sel = None
+        lay = QVBoxLayout(self); lay.setContentsMargins(8, 8, 8, 8)
+
+        bar = QHBoxLayout()
+        self._open_btn = QPushButton("open card…")
+        self._open_btn.clicked.connect(self._choose_card)
+        bar.addWidget(self._open_btn)
+        self._path_lbl = QLabel(""); self._path_lbl.setStyleSheet("color:#8fb0c8; font-size:11px;")
+        bar.addWidget(self._path_lbl, 1)
+        lay.addLayout(bar)
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        self._list = QListWidget(); self._list.setIconSize(QSize(32, 32))
+        self._list.setMaximumWidth(280)
+        self._list.currentRowChanged.connect(self._on_select)
+        split.addWidget(self._list)
+
+        right = QWidget(); rl = QVBoxLayout(right)
+        self._title = QLabel("—"); self._title.setStyleSheet("font-weight:600; color:#ECEFF1;")
+        rl.addWidget(self._title)
+        row = QHBoxLayout()
+        self._icon = QLabel(); self._icon.setFixedSize(64, 64)
+        self._icon.setStyleSheet("background:#11171c;")
+        row.addWidget(self._icon)
+        self._meta = QLabel(""); self._meta.setStyleSheet("color:#8fb0c8; font-size:11px;")
+        self._meta.setWordWrap(True); row.addWidget(self._meta, 1)
+        rl.addLayout(row)
+
+        self._emblem = _EmblemDrop()
+        self._emblem.image_chosen.connect(self._import_emblem)
+        rl.addWidget(self._emblem, 0, Qt.AlignmentFlag.AlignHCenter)
+        self._pal = PaletteStrip("emblem palette")
+        rl.addWidget(self._pal)
+
+        btns = QHBoxLayout()
+        self._export_btn = QPushButton("export PNG…"); self._export_btn.clicked.connect(self._export_emblem)
+        self._export_btn.setEnabled(False); btns.addWidget(self._export_btn)
+        btns.addStretch()
+        rl.addLayout(btns)
+        self._note = QLabel(
+            "Drop/click the emblem to import a GIF/PNG — it's auto-matched to the\n"
+            "16-colour emblem palette and written back to the card. Emblem = 64×64 4bpp\n"
+            "(pixel offset DuckStation-pending; see docs/AC1_EMBLEM.md).")
+        self._note.setStyleSheet("color:#6B8AA0; font-size:10px;")
+        rl.addWidget(self._note)
+        rl.addStretch()
+        split.addWidget(right)
+        lay.addWidget(split, 1)
+
+        start = Path(card_path) if card_path else DEFAULT_CARD
+        if start.exists():
+            self._load_card(start)
+
+    # ---- card loading ----
+    def _choose_card(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open PS1 memory card", str(DEFAULT_CARD.parent if DEFAULT_CARD.exists() else Path.home()),
+            "Memory cards (*.mcd *.mcr *.srm *.vmp *.gme);;All files (*)")
+        if path:
+            self._load_card(Path(path))
+
+    def _load_card(self, path):
+        from core import memcard as M
+        try:
+            self._card = M.read_card(str(path))
+        except Exception as ex:
+            QMessageBox.warning(self, "Memory Card", f"Could not read card:\n{ex}"); return
+        self._path = path
+        self._path_lbl.setText(str(path))
+        self._list.clear()
+        for s in self._card.saves:
+            it = QListWidgetItem(f"slot{s.slot}  {s.label}")
+            r = self._card.icon_rgba(s)
+            if r:
+                it.setIcon(QIcon(_rgba_to_pixmap(*r)))
+            if not s.is_ac1:
+                it.setForeground(QColor("#6B7B88"))
+            it.setData(Qt.ItemDataRole.UserRole, s.slot)
+            self._list.addItem(it)
+        if self._card.saves:
+            self._list.setCurrentRow(0)
+        else:
+            self._title.setText("(no saves on this card)")
+
+    def _on_select(self, row):
+        from core import memcard as M
+        if not self._card or row < 0 or row >= len(self._card.saves):
+            return
+        s = self._card.saves[row]; self._sel = s
+        self._title.setText(f"{s.label}    [{s.code}]")
+        r = self._card.icon_rgba(s)
+        if r:
+            self._icon.setPixmap(_rgba_to_pixmap(r[0], r[1], r[2], 4))
+        blk = self._card.block_bytes(s.slot)
+        if s.is_ac1:
+            blank = M.is_emblem_blank(blk)
+            self._meta.setText(f"AC1 save · {s.size_blocks} block(s) · "
+                               f"emblem {'BLANK (not drawn yet)' if blank else 'drawn'}")
+            w, h, rgba = M.decode_emblem(blk)
+            self._emblem.setPixmap(_rgba_to_pixmap(w, h, rgba, 4))
+            self._pal.set_colors(M.emblem_palette(blk), "16")
+            self._emblem.setEnabled(True); self._export_btn.setEnabled(True)
+        else:
+            self._meta.setText("not an Armored Core 1 save — emblem editing is AC1-only.")
+            self._emblem.clear(); self._emblem.setText("(not an AC1 save)")
+            self._emblem.setEnabled(False); self._export_btn.setEnabled(False)
+            self._pal.clear()
+
+    # ---- emblem import/export ----
+    def _import_emblem(self, img_path):
+        from core import memcard as M
+        if not self._sel or not self._sel.is_ac1:
+            return
+        if QMessageBox.question(
+                self, "Write emblem",
+                f"Match '{Path(img_path).name}' to the 16-colour emblem palette and "
+                f"write it into this save on\n{self._path}?\n\n"
+                f"A backup (.bak) is made first.") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            blk = self._card.block_bytes(self._sel.slot)
+            data = M.encode_emblem(str(img_path), blk)
+            bak = self._path.with_suffix(self._path.suffix + ".bak")
+            if not bak.exists():
+                bak.write_bytes(self._path.read_bytes())
+            self._card.patch(self._sel.slot, M.EMBLEM_PIX_OFF, data)
+            self._card.save()
+            self._on_select(self._list.currentRow())
+            QMessageBox.information(self, "Emblem", "Emblem written to card.\n"
+                                    "If it looks offset in-game, the pixel offset needs the "
+                                    "DuckStation confirm (docs/AC1_EMBLEM.md).")
+        except Exception as ex:
+            QMessageBox.warning(self, "Emblem", f"Import failed:\n{ex}")
+
+    def _export_emblem(self):
+        from core import memcard as M
+        if not self._sel:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export emblem PNG", "emblem.png", "PNG (*.png)")
+        if not path:
+            return
+        w, h, rgba = M.decode_emblem(self._card.block_bytes(self._sel.slot))
+        _rgba_to_pixmap(w, h, rgba, 4).save(path)
+
+
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
@@ -1839,6 +2063,10 @@ class MainWindow(QMainWindow):
         idx = self.project.index_path or INDEX_PATH
         self._mission_view = MissionView(bin_path, idx)
         self._mission_view.show()
+
+    def _on_open_memcard(self):
+        self._memcard_view = MemoryCardView()
+        self._memcard_view.show()
 
     def _build_ui(self):
         toolbar = QWidget()
@@ -1870,6 +2098,11 @@ class MainWindow(QMainWindow):
         self.missions_btn.setStyleSheet(self._btn_style())
         self.missions_btn.clicked.connect(self._on_open_missions)
         tb_layout.addWidget(self.missions_btn)
+
+        self.memcard_btn = QPushButton("💾 Memory Card")
+        self.memcard_btn.setStyleSheet(self._btn_style())
+        self.memcard_btn.clicked.connect(self._on_open_memcard)
+        tb_layout.addWidget(self.memcard_btn)
 
         tb_layout.addStretch()
 

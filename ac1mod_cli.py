@@ -200,6 +200,70 @@ def cmd_missions(proj, idx, args):
     print(f"rendered {done} missions to {out_dir}")
 
 
+def cmd_mistim(proj, idx, args):
+    """Extract every embedded MIS.T mission-preview TIM (all ~194), optionally to PNG."""
+    from core import mis
+    out_dir = args.out_dir or "/tmp/ac1_mis_tims"
+    paths = mis.extract_tims(proj.bin_path, out_dir)
+    print(f"extracted {len(paths)} MIS.T TIMs -> {out_dir}")
+    if args.png:
+        from core.jpsxdec import decode_tim_to_rgba
+        from PIL import Image
+        n = 0
+        for i, p in enumerate(paths):
+            r = decode_tim_to_rgba(p, 0)
+            if r:
+                w, h, rgba = r
+                Image.frombytes("RGBA", (w, h), rgba).save(os.path.join(out_dir, f"MIS_{i:03d}.png"))
+                n += 1
+        print(f"decoded {n} previews to PNG in {out_dir}")
+
+
+DEFAULT_CARD = ("/home/byron/.local/share/duckstation/memcards/"
+                "Armored Core (USA) (Reprint)_1.mcd")
+
+
+def cmd_memcard(proj, idx, args):
+    """Browse a PS1 memory card; view/export/import AC1 emblems."""
+    from core import memcard as M
+    from PIL import Image
+    if args.pix_off is None:
+        args.pix_off = M.EMBLEM_PIX_OFF
+    card = M.read_card(args.card or DEFAULT_CARD)
+    if args.action == "list":
+        print(f"{Path(args.card or DEFAULT_CARD).name}: {len(card.saves)} save(s)")
+        for s in card.saves:
+            tag = "AC1" if s.is_ac1 else "   "
+            blank = ""
+            if s.is_ac1:
+                blank = " (emblem: blank)" if M.is_emblem_blank(card.block_bytes(s.slot)) else " (emblem: drawn)"
+            print(f"  [{tag}] slot{s.slot} {s.code:14s} {s.label}{blank}")
+        return
+    # actions below need an AC1 save
+    sv = next((s for s in card.saves if s.is_ac1 and (args.slot is None or s.slot == args.slot)), None)
+    if not sv:
+        sys.exit("no AC1 save found on card")
+    blk = card.block_bytes(sv.slot)
+    if args.action == "icon":
+        w, h, rgba = card.icon_rgba(sv)
+        out = args.out or "/tmp/ac1_save_icon.png"
+        Image.frombytes("RGBA", (w, h), rgba).resize((128, 128), Image.NEAREST).save(out)
+        print("wrote", out)
+    elif args.action == "emblem-export":
+        w, h, rgba = M.decode_emblem(blk, args.pix_off)
+        out = args.out or "/tmp/ac1_emblem.png"
+        Image.frombytes("RGBA", (w, h), rgba).resize((256, 256), Image.NEAREST).save(out)
+        print(f"wrote {out}  (blank={M.is_emblem_blank(blk, args.pix_off)})")
+    elif args.action == "emblem-import":
+        if not args.image:
+            sys.exit("emblem-import needs --image PATH")
+        data = M.encode_emblem(args.image, blk)
+        card.patch(sv.slot, args.pix_off, data)
+        card.save(args.out)         # writes back to card (or --out copy)
+        print(f"imported {args.image} -> emblem of slot{sv.slot} "
+              f"({'in place' if not args.out else args.out})")
+
+
 def main():
     ap = argparse.ArgumentParser(description="AC1mod headless CLI")
     ap.add_argument("--project", help="path to a .ac1mod project")
@@ -207,6 +271,17 @@ def main():
 
     sub.add_parser("list", help="list PA files + notes")
     sub.add_parser("notes", help="dump all notes")
+    p = sub.add_parser("mistim", help="extract all MIS.T mission-preview TIMs")
+    p.add_argument("--out-dir"); p.add_argument("--png", action="store_true",
+                   help="also decode each preview to PNG")
+    p = sub.add_parser("memcard", help="browse PS1 card; view/import/export AC1 emblem")
+    p.add_argument("action", choices=["list", "icon", "emblem-export", "emblem-import"])
+    p.add_argument("--card", help="path to .mcd/.mcr card (default: DuckStation AC1 card)")
+    p.add_argument("--slot", type=int, help="directory slot (default: first AC1 save)")
+    p.add_argument("--image", help="GIF/PNG to import (emblem-import)")
+    p.add_argument("--pix-off", type=lambda s: int(s, 0), default=None,
+                   help="emblem pixel offset override (DuckStation-confirmed)")
+    p.add_argument("-o", "--out", help="output file / write card copy here instead of in place")
     p = sub.add_parser("missions", help="batch-render every mission's populated scene")
     p.add_argument("--out-dir"); p.add_argument("--first", type=int, default=0)
     p.add_argument("--last", type=int, default=49)
@@ -236,7 +311,8 @@ def main():
     args = ap.parse_args()
     _, proj, idx = load(args.project)
     {"list": cmd_list, "notes": cmd_notes, "info": cmd_info, "note": cmd_note,
-     "obj": cmd_obj, "render": cmd_render, "missions": cmd_missions}[args.cmd](proj, idx, args)
+     "obj": cmd_obj, "render": cmd_render, "missions": cmd_missions,
+     "mistim": cmd_mistim, "memcard": cmd_memcard}[args.cmd](proj, idx, args)
 
 
 if __name__ == "__main__":
