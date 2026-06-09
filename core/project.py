@@ -30,7 +30,21 @@ class Project:
         self.audio_replacement_meta: dict[int, str] = {}
         # Entry numbers the user has ticked in the index list
         self.checked_entries: list[int] = []
+        # AC1mod: free-text notes per PA##.T file, keyed by jPSXdec file id
+        # (e.g. "GG/P0/PA00.T" -> "PA00 = light-MT enemy mesh"). Only stored here.
+        self.pa_annotations: dict[str, str] = {}
         self.dirty: bool = False
+
+    def get_annotation(self, file_id: str) -> str:
+        return self.pa_annotations.get(file_id, "")
+
+    def set_annotation(self, file_id: str, text: str):
+        text = (text or "").strip()
+        if text:
+            self.pa_annotations[file_id] = text
+        else:
+            self.pa_annotations.pop(file_id, None)
+        self.dirty = True
 
     @property
     def name(self) -> str:
@@ -59,6 +73,7 @@ class Project:
             "audio_replacements": {str(k): v for k, v in self.audio_replacements.items()},
             "audio_replacement_meta": {str(k): v for k, v in self.audio_replacement_meta.items()},
             "checked_entries": sorted(self.checked_entries),
+            "pa_annotations": dict(sorted(self.pa_annotations.items())),
         }
         path.write_text(json.dumps(data, indent=2))
         self.project_path = path
@@ -77,5 +92,6 @@ class Project:
         p.audio_replacements = {int(k): v for k, v in data.get("audio_replacements", {}).items()}
         p.audio_replacement_meta = {int(k): v for k, v in data.get("audio_replacement_meta", {}).items()}
         p.checked_entries = [int(x) for x in data.get("checked_entries", [])]
+        p.pa_annotations = {str(k): str(v) for k, v in data.get("pa_annotations", {}).items()}
         p.dirty = False
         return p

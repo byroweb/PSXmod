@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer
 from PyQt6.QtGui import QPixmap, QImage, QColor, QFont, QBrush, QPainter, QPen
-from PyQt6.QtWidgets import QComboBox
+from PyQt6.QtWidgets import QComboBox, QCheckBox
 
 from core.jpsxdec import (
     IndexEntry, TimInfo, AudioInfo, parse_tim, decode_tim_to_rgba,
@@ -753,6 +753,137 @@ class HexViewWidget(QWidget):
 # ---------------------------------------------------------------------------
 # Detail panel
 # ---------------------------------------------------------------------------
+import re as _re
+_PA_RE = _re.compile(r"/P[0-3]/PA\d{2}\.T$")
+
+
+def _entry_is_pa(entry) -> bool:
+    # full_id like "GG/P0/PA00.T"; _PA_RE is anchored to .T$ so sub-streams
+    # ("…PA00.T[0]") don't match.
+    fid = getattr(entry, "full_id", "") or getattr(entry, "name", "")
+    return bool(_PA_RE.search(fid))
+
+
+class _MeshCanvas(QWidget):
+    """Software-rendered, orbitable view of a PA Mesh (no OpenGL needed)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._mesh = None
+        self.yaw, self.pitch, self.zoom = 0.6, 0.4, 1.3
+        self.wire = False
+        self._drag = None
+        self.setMinimumSize(360, 280)
+        self.setStyleSheet("background:#181a20;")
+
+    def set_mesh(self, m):
+        self._mesh = m
+        self.update()
+
+    def paintEvent(self, _e):
+        from core.render import render_mesh
+        img = render_mesh(self._mesh, max(self.width(), 8), max(self.height(), 8),
+                          self.yaw, self.pitch, self.zoom, wire=self.wire)
+        QPainter(self).drawImage(0, 0, img)
+
+    def mousePressEvent(self, e):
+        self._drag = e.position()
+
+    def mouseMoveEvent(self, e):
+        if self._drag is not None:
+            d = e.position() - self._drag
+            self._drag = e.position()
+            self.yaw += d.x() * 0.01
+            self.pitch += d.y() * 0.01
+            self.update()
+
+    def mouseReleaseEvent(self, _e):
+        self._drag = None
+
+    def wheelEvent(self, e):
+        self.zoom *= 1.0 + (e.angleDelta().y() / 1200.0)
+        self.zoom = max(0.2, min(8.0, self.zoom))
+        self.update()
+
+
+class ModelView3D(QWidget):
+    """PA##.T 3D viewer page: object picker + orbit canvas + per-file notes."""
+    note_edited = pyqtSignal(str, str)   # file_id, text
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._file_id = ""
+        self._sec = (0, 0)
+        self._bin = None
+        self._blocks = []
+        self._loading = False
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        bar = QHBoxLayout()
+        self._combo = QComboBox()
+        self._combo.currentIndexChanged.connect(self._on_pick)
+        self._wire = QCheckBox("wireframe")
+        self._wire.toggled.connect(self._on_wire)
+        bar.addWidget(QLabel("object:"))
+        bar.addWidget(self._combo, 1)
+        bar.addWidget(self._wire)
+        lay.addLayout(bar)
+
+        self.canvas = _MeshCanvas()
+        lay.addWidget(self.canvas, 1)
+        self._stats = QLabel("")
+        self._stats.setStyleSheet("font-size:11px; color:#6B8AA0;")
+        lay.addWidget(self._stats)
+
+        lay.addWidget(QLabel("notes for this PA file (saved in the AC1mod project):"))
+        self.notes = QPlainTextEdit()
+        self.notes.setMaximumHeight(90)
+        self.notes.setPlaceholderText("e.g. PA00 = light MT enemy; entry 2 = cockpit, X-symmetric…")
+        self.notes.textChanged.connect(self._on_note)
+        lay.addWidget(self.notes)
+
+    def load(self, file_id, bin_path, sec0, sec1, note=""):
+        from core import pa_parser
+        self._file_id, self._bin, self._sec = file_id, bin_path, (sec0, sec1)
+        self._blocks = pa_parser.parse_pa_blocks(bin_path, sec0, sec1)
+        self._combo.blockSignals(True)
+        self._combo.clear()
+        self._combo.addItem(f"ALL ({len(self._blocks)} objects)")
+        for ei, m in self._blocks:
+            self._combo.addItem(f"entry {ei}  ({m.stats()['faces']} faces)")
+        self._combo.setCurrentIndex(0)
+        self._combo.blockSignals(False)
+        self._loading = True
+        self.notes.setPlainText(note)
+        self._loading = False
+        self._render_index(0)
+
+    def _render_index(self, i):
+        from core import pa_parser
+        if i <= 0:
+            mesh = pa_parser.combined_mesh(self._bin, *self._sec)
+            label = f"ALL — {len(self._blocks)} objects"
+        else:
+            _, mesh = self._blocks[i - 1]
+            label = self._combo.currentText().strip()
+        self.canvas.set_mesh(mesh)
+        st = mesh.stats()
+        self._stats.setText(f"{label}: {st['verts']} verts, {st['faces']} faces, "
+                            f"{st['groups']} sub-objects   ·   drag = orbit, wheel = zoom")
+
+    def _on_pick(self, i):
+        if self._bin:
+            self._render_index(i)
+
+    def _on_wire(self, b):
+        self.canvas.wire = b
+        self.canvas.update()
+
+    def _on_note(self):
+        if not self._loading and self._file_id:
+            self.note_edited.emit(self._file_id, self.notes.toPlainText())
+
+
 class DetailPanel(QWidget):
     replacement_saved = pyqtSignal(int, object, str)        # entry_number, out_path (Path), meta_html
     audio_replacement_saved = pyqtSignal(int, object, str)  # entry_number, out_path (Path), meta_html
@@ -889,6 +1020,30 @@ class DetailPanel(QWidget):
         self._hex_view = HexViewWidget()
         self._stack.addWidget(self._hex_view)   # index 2
 
+        # ---- Page 3: PA##.T 3D model view ----
+        self._model_view = ModelView3D()
+        self._model_view.note_edited.connect(self._on_pa_note_edited)
+        self._stack.addWidget(self._model_view)  # index 3
+        self._project = None
+
+    def set_project(self, project):
+        self._project = project
+
+    def _on_pa_note_edited(self, file_id: str, text: str):
+        if self._project is not None:
+            self._project.set_annotation(file_id, text)
+
+    def show_pa_entry(self, entry: IndexEntry):
+        self._current_entry = entry
+        self._stop_audio()
+        self._audio_bar.hide()
+        fid = getattr(entry, "full_id", "") or entry.name
+        note = self._project.get_annotation(fid) if self._project is not None else ""
+        bin_path = str(self._bin_path) if self._bin_path else None
+        if bin_path:
+            self._model_view.load(fid, bin_path, entry.sector_start, entry.sector_end, note)
+        self._stack.setCurrentIndex(3)
+
     def set_index_path(self, p: Path):
         self._index_path = p
 
@@ -946,6 +1101,9 @@ class DetailPanel(QWidget):
                 self._play_audio(repl_wav)
 
     def show_entry(self, entry: IndexEntry):
+        if _entry_is_pa(entry):
+            self.show_pa_entry(entry)
+            return
         if _entry_is_text(entry):
             self.show_text_entry(entry)
             return
@@ -1578,6 +1736,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.index_panel)
 
         self.detail_panel = DetailPanel()
+        self.detail_panel.set_project(self.project)
         self.detail_panel.replacement_saved.connect(self._on_replacement_saved)
         self.detail_panel.audio_replacement_saved.connect(self._on_audio_replacement_saved)
         splitter.addWidget(self.detail_panel)
@@ -1635,6 +1794,7 @@ class MainWindow(QMainWindow):
     def _load_project_from_path(self, path: Path):
         try:
             self.project = Project.load(path)
+            self.detail_panel.set_project(self.project)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not load project:\n{e}")
             return
